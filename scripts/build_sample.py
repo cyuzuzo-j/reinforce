@@ -21,6 +21,8 @@ import os
 import sys
 import time
 from pathlib import Path
+    from huggingface_hub import hf_hub_download
+
 
 import duckdb
 import pandas as pd
@@ -59,7 +61,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _download_markets(out_dir: Path) -> Path:
-    from huggingface_hub import hf_hub_download
 
     out_dir.mkdir(parents=True, exist_ok=True)
     logger.info("downloading markets.parquet from HF")
@@ -118,11 +119,11 @@ def _try_remote_quant(market_ids: list[str], out_path: Path, timeout_sec: int) -
         return False
     placeholders = ",".join(["?"] * len(market_ids))
     sql = (
-        f"COPY (SELECT * FROM read_parquet(?) "
+        f"COPY (SELECT * FROM read_parquet('{REMOTE_QUANT_URL}') "
         f"WHERE market_id IN ({placeholders})) "
-        f"TO ? (FORMAT 'parquet')"
+        f"TO '{out_path}' (FORMAT 'parquet')"
     )
-    params = [REMOTE_QUANT_URL, *market_ids, str(out_path)]
+    params = list(market_ids)
     start = time.monotonic()
     try:
         con.execute(sql, params)
@@ -151,11 +152,11 @@ def _local_quant_filter(market_ids: list[str], out_path: Path, cache_dir: Path) 
         con = duckdb.connect()
         placeholders = ",".join(["?"] * len(market_ids))
         sql = (
-            f"COPY (SELECT * FROM read_parquet(?) "
+            f"COPY (SELECT * FROM read_parquet('{local}') "
             f"WHERE market_id IN ({placeholders})) "
-            f"TO ? (FORMAT 'parquet')"
+            f"TO '{out_path}' (FORMAT 'parquet')"
         )
-        con.execute(sql, [local, *market_ids, str(out_path)])
+        con.execute(sql, list(market_ids))
         con.close()
     finally:
         try:
