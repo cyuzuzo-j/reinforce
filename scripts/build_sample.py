@@ -21,6 +21,8 @@ import os
 import sys
 import time
 from pathlib import Path
+    from huggingface_hub import hf_hub_download
+
 
 import duckdb
 import pandas as pd
@@ -59,7 +61,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _download_markets(out_dir: Path) -> Path:
-    from huggingface_hub import hf_hub_download
 
     out_dir.mkdir(parents=True, exist_ok=True)
     logger.info("downloading markets.parquet from HF")
