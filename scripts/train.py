@@ -63,6 +63,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--checkpoint-freq", type=int, default=50_000)
     p.add_argument("--eval-freq", type=int, default=20_000)
     p.add_argument("--subproc", action="store_true", help="use SubprocVecEnv")
+    p.add_argument("--extra-features", type=str, nargs="+", default=[])
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         fee_bps=args.fee_bps,
         invalid_action_penalty=args.invalid_action_penalty,
         seed=args.seed,
+        extra_features=tuple(args.extra_features),
     )
 
     loader = MarketLoader(markets_path, quant_path)

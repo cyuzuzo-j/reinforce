@@ -1,0 +1,202 @@
+{
+  "version": "1.0",
+  "python_version": "3.12",
+  "generated_at": "2026-05-11T15:14:32.732875Z",
+  "project_name": "trading",
+  "resources": {
+    "cpu_worker": {
+      "resource_type": "CpuLiveServerless",
+      "file_path": "reinforce/cpu_worker.py",
+      "local_path_prefix": "/reinforce/cpu_worker",
+      "module_path": "reinforce.cpu_worker",
+      "functions": [
+        {
+          "name": "cpu_hello",
+          "module": "reinforce.cpu_worker",
+          "is_async": true,
+          "is_class": false
+        }
+      ],
+      "is_load_balanced": false,
+      "is_live_resource": true,
+      "config_variable": null,
+      "makes_remote_calls": false,
+      "imageName": "runpod/flash-cpu:py3.12-latest",
+      "instanceIds": [
+        "cpu3c-1-2"
+      ],
+      "workersMin": 0,
+      "workersMax": 1,
+      "idleTimeout": 60,
+      "scalerType": "QUEUE_DELAY",
+      "scalerValue": 4,
+      "template": {
+        "containerDiskInGb": 10,
+        "dockerArgs": "",
+        "startScript": "",
+        "advancedStart": false,
+        "containerRegistryAuthId": ""
+      },
+      "handler_file": "handler_cpu_worker.py",
+      "target_python_version": "3.12",
+      "env": {
+        "_FLASH_SOURCE_FINGERPRINT": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec"
+      },
+      "endpoint_id": "tcfvis47i5fqwe"
+    },
+    "gpu_worker": {
+      "resource_type": "LiveServerless",
+      "file_path": "reinforce/gpu_worker.py",
+      "local_path_prefix": "/reinforce/gpu_worker",
+      "module_path": "reinforce.gpu_worker",
+      "functions": [
+        {
+          "name": "gpu_hello",
+          "module": "reinforce.gpu_worker",
+          "is_async": true,
+          "is_class": false
+        }
+      ],
+      "is_load_balanced": false,
+      "is_live_resource": true,
+      "config_variable": null,
+      "makes_remote_calls": false,
+      "imageName": "runpod/flash:py3.12-latest",
+      "gpuIds": "ADA_24,ADA_32_PRO,ADA_48_PRO,ADA_80_PRO,AMPERE_16,AMPERE_24,AMPERE_48,AMPERE_80,BLACKWELL_180,BLACKWELL_96,HOPPER_141",
+      "workersMin": 0,
+      "workersMax": 1,
+      "idleTimeout": 60,
+      "scalerType": "QUEUE_DELAY",
+      "scalerValue": 4,
+      "minCudaVersion": "12.8",
+      "template": {
+        "containerDiskInGb": 64,
+        "dockerArgs": "",
+        "startScript": "",
+        "advancedStart": false,
+        "containerRegistryAuthId": ""
+      },
+      "handler_file": "handler_gpu_worker.py",
+      "target_python_version": "3.12",
+      "env": {
+        "_FLASH_SOURCE_FINGERPRINT": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec"
+      },
+      "endpoint_id": "7j0wxbwhx3cjne"
+    },
+    "lb_worker": {
+      "resource_type": "CpuLiveLoadBalancer",
+      "file_path": "reinforce/lb_worker.py",
+      "local_path_prefix": "/reinforce/lb_worker",
+      "module_path": "reinforce.lb_worker",
+      "functions": [
+        {
+          "name": "health",
+          "module": "reinforce.lb_worker",
+          "is_async": true,
+          "is_class": false,
+          "http_method": "GET",
+          "http_path": "/health"
+        },
+        {
+          "name": "process",
+          "module": "reinforce.lb_worker",
+          "is_async": true,
+          "is_class": false,
+          "http_method": "POST",
+          "http_path": "/process"
+        }
+      ],
+      "is_load_balanced": true,
+      "is_live_resource": true,
+      "config_variable": "api",
+      "makes_remote_calls": false,
+      "imageName": "runpod/flash-lb-cpu:py3.12-latest",
+      "instanceIds": [
+        "cpu3c-1-2"
+      ],
+      "workersMin": 1,
+      "workersMax": 3,
+      "idleTimeout": 60,
+      "scalerType": "REQUEST_COUNT",
+      "scalerValue": 4,
+      "template": {
+        "containerDiskInGb": 10,
+        "dockerArgs": "",
+        "startScript": "",
+        "advancedStart": false,
+        "containerRegistryAuthId": ""
+      },
+      "target_python_version": "3.12",
+      "env": {
+        "_FLASH_SOURCE_FINGERPRINT": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec"
+      },
+      "endpoint_id": "8r037vifchxfxs"
+    },
+    "polymarket-gym-train": {
+      "resource_type": "LiveServerless",
+      "file_path": "train_remote.py",
+      "local_path_prefix": "/train_remote",
+      "module_path": "train_remote",
+      "functions": [
+        {
+          "name": "train",
+          "module": "train_remote",
+          "is_async": true,
+          "is_class": false
+        }
+      ],
+      "is_load_balanced": false,
+      "is_live_resource": true,
+      "config_variable": null,
+      "makes_remote_calls": false,
+      "imageName": "runpod/flash:py3.12-latest",
+      "gpuIds": "ADA_24,ADA_32_PRO,ADA_48_PRO,ADA_80_PRO,AMPERE_16,AMPERE_24,AMPERE_48,AMPERE_80,BLACKWELL_180,BLACKWELL_96,HOPPER_141",
+      "workersMin": 0,
+      "workersMax": 1,
+      "idleTimeout": 60,
+      "scalerType": "QUEUE_DELAY",
+      "scalerValue": 4,
+      "minCudaVersion": "12.8",
+      "networkVolumes": [
+        {
+          "name": "trading-vol",
+          "size": 20,
+          "dataCenterId": "EU-RO-1"
+        }
+      ],
+      "template": {
+        "containerDiskInGb": 64,
+        "dockerArgs": "",
+        "startScript": "",
+        "advancedStart": false,
+        "containerRegistryAuthId": ""
+      },
+      "handler_file": "handler_polymarket-gym-train.py",
+      "target_python_version": "3.12",
+      "env": {
+        "_FLASH_SOURCE_FINGERPRINT": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec"
+      },
+      "endpoint_id": "9dx78dvfdxrvb6"
+    }
+  },
+  "function_registry": {
+    "cpu_hello": "cpu_worker",
+    "gpu_hello": "gpu_worker",
+    "health": "lb_worker",
+    "process": "lb_worker",
+    "train": "polymarket-gym-train"
+  },
+  "routes": {
+    "lb_worker": {
+      "GET /health": "health",
+      "POST /process": "process"
+    }
+  },
+  "source_fingerprint": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec",
+  "resources_endpoints": {
+    "cpu_worker": "https://api.runpod.ai/v2/tcfvis47i5fqwe",
+    "gpu_worker": "https://api.runpod.ai/v2/7j0wxbwhx3cjne",
+    "lb_worker": "https://8r037vifchxfxs.api.runpod.ai",
+    "polymarket-gym-train": "https://api.runpod.ai/v2/9dx78dvfdxrvb6"
+  }
+}

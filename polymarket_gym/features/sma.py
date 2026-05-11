@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from polymarket_gym.features import register
+from polymarket_gym.features.registry import register
 
 
 @register
