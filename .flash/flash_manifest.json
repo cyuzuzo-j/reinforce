@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "python_version": "3.12",
-  "generated_at": "2026-05-11T15:14:32.732875Z",
+  "generated_at": "2026-05-11T15:35:09.518566Z",
   "project_name": "trading",
   "resources": {
     "cpu_worker": {
@@ -40,7 +40,7 @@
       "handler_file": "handler_cpu_worker.py",
       "target_python_version": "3.12",
       "env": {
-        "_FLASH_SOURCE_FINGERPRINT": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec"
+        "_FLASH_SOURCE_FINGERPRINT": "173f9638624e05314ee36160a3caaf4a567056b94804907fd0c89ac0ad1903a1"
       },
       "endpoint_id": "tcfvis47i5fqwe"
     },
@@ -79,7 +79,7 @@
       "handler_file": "handler_gpu_worker.py",
       "target_python_version": "3.12",
       "env": {
-        "_FLASH_SOURCE_FINGERPRINT": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec"
+        "_FLASH_SOURCE_FINGERPRINT": "173f9638624e05314ee36160a3caaf4a567056b94804907fd0c89ac0ad1903a1"
       },
       "endpoint_id": "7j0wxbwhx3cjne"
     },
@@ -128,7 +128,7 @@
       },
       "target_python_version": "3.12",
       "env": {
-        "_FLASH_SOURCE_FINGERPRINT": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec"
+        "_FLASH_SOURCE_FINGERPRINT": "173f9638624e05314ee36160a3caaf4a567056b94804907fd0c89ac0ad1903a1"
       },
       "endpoint_id": "8r037vifchxfxs"
     },
@@ -159,9 +159,9 @@
       "minCudaVersion": "12.8",
       "networkVolumes": [
         {
-          "name": "trading-vol",
+          "name": "trading-vol-us",
           "size": 20,
-          "dataCenterId": "EU-RO-1"
+          "dataCenterId": "US-KS-2"
         }
       ],
       "template": {
@@ -174,7 +174,7 @@
       "handler_file": "handler_polymarket-gym-train.py",
       "target_python_version": "3.12",
       "env": {
-        "_FLASH_SOURCE_FINGERPRINT": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec"
+        "_FLASH_SOURCE_FINGERPRINT": "173f9638624e05314ee36160a3caaf4a567056b94804907fd0c89ac0ad1903a1"
       },
       "endpoint_id": "9dx78dvfdxrvb6"
     }
@@ -192,7 +192,7 @@
       "POST /process": "process"
     }
   },
-  "source_fingerprint": "c550e8f40bfcc68283724797ad2ddca85edaa882b6307a98d6a07b7b4270c2ec",
+  "source_fingerprint": "173f9638624e05314ee36160a3caaf4a567056b94804907fd0c89ac0ad1903a1",
   "resources_endpoints": {
     "cpu_worker": "https://api.runpod.ai/v2/tcfvis47i5fqwe",
     "gpu_worker": "https://api.runpod.ai/v2/7j0wxbwhx3cjne",

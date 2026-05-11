@@ -8,16 +8,16 @@ import torch
 from runpod_flash import DataCenter, Endpoint, GpuType, NetworkVolume
 
 training_vol = NetworkVolume(
-    name="trading-vol",
+    name="trading-vol-us",
     size=20,
-    datacenter=DataCenter.EU_RO_1,
+    datacenter=DataCenter.US_KS_2,
 )
 
 
 @Endpoint(
     name="polymarket-gym-train",
     gpu=GpuType.ANY,
-    dependencies=["torch"],
+    dependencies=["torch", "duckdb", "gymnasium", "pandas","huggingface_hub" , "stable_baselines3"],
     volume=training_vol,
 )
 async def train(total_timesteps: int = 10000) -> dict:
