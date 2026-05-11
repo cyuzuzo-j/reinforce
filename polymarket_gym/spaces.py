@@ -6,7 +6,8 @@ from gymnasium import spaces
 
 from polymarket_gym.config import EnvConfig
 from polymarket_gym.feed import Bar
-from polymarket_gym.features import apply_features, build as build_features
+from polymarket_gym.features.base import apply_features
+from polymarket_gym.features.registry import build as build_features
 
 WINDOW_FEATURES = (
     "close",
