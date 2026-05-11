@@ -1,9 +1,5 @@
 {
   "input": {
-    "total_timesteps": 100,
-    "github_token": "",
-    "github_repo": "cyuzuzo-j/reinforce",
-    "release_id": "",
-    "pr_number": 0
+    "total_timesteps": 100
   }
 }
