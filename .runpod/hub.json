@@ -1,0 +1,29 @@
+{
+  "input": {
+    "total_timesteps": {
+      "type": "integer",
+      "description": "Number of timesteps to train",
+      "default": 10000
+    },
+    "github_token": {
+      "type": "string",
+      "description": "GitHub token to post stats (optional)",
+      "default": ""
+    },
+    "github_repo": {
+      "type": "string",
+      "description": "GitHub repository (e.g. cyuzuzo-j/reinforce)",
+      "default": "cyuzuzo-j/reinforce"
+    },
+    "release_id": {
+      "type": "string",
+      "description": "Release ID or tag to update with training stats",
+      "default": ""
+    },
+    "pr_number": {
+      "type": "integer",
+      "description": "PR number to comment on",
+      "default": 0
+    }
+  }
+}
