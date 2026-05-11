@@ -8,7 +8,7 @@
     "github_token": {
       "type": "string",
       "description": "GitHub token to post stats (optional)",
-      "default": ""
+      "default": "{{ RUNPOD_SECRET_GITHUB_TOKEN }}"
     },
     "github_repo": {
       "type": "string",
