@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from gymnasium import spaces
 
 from polymarket_gym.config import EnvConfig
 from polymarket_gym.feed import Bar
+from polymarket_gym.features import apply_features, build as build_features
 
 WINDOW_FEATURES = (
     "close",
@@ -26,13 +28,17 @@ SCALAR_FEATURES = (
 N_SCALAR_FEATURES = len(SCALAR_FEATURES)
 
 
+def n_window_features(cfg: EnvConfig) -> int:
+    return N_WINDOW_FEATURES + len(cfg.extra_features)
+
+
 def build_observation_space(cfg: EnvConfig) -> spaces.Dict:
     return spaces.Dict(
         {
             "window": spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(cfg.lookback, N_WINDOW_FEATURES),
+                shape=(cfg.lookback, n_window_features(cfg)),
                 dtype=np.float32,
             ),
             "scalars": spaces.Box(
@@ -85,8 +91,44 @@ def _window_from_history(history: list[Bar], cfg: EnvConfig) -> np.ndarray:
             rv.astype(np.float32),
         ],
         axis=1,
+    ).astype(np.float32)
+
+    if cfg.extra_features:
+        extra = _extra_features_block(history, cfg)
+        out = np.concatenate([out, extra], axis=1)
+    return out
+
+
+def _history_to_df(history: list[Bar]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "open": [b.open for b in history],
+            "high": [b.high for b in history],
+            "low": [b.low for b in history],
+            "close": [b.close for b in history],
+            "volume_usd": [b.volume_usd for b in history],
+            "volume_tokens": [b.volume_tokens for b in history],
+            "n_trades": [b.n_trades for b in history],
+            "hl_range": [b.hl_range for b in history],
+            "rv": [b.rv for b in history],
+        },
+        index=pd.Index([b.ts for b in history], name="ts"),
     )
-    return out.astype(np.float32)
+
+
+def _extra_features_block(history: list[Bar], cfg: EnvConfig) -> np.ndarray:
+    history_df = _history_to_df(history)
+    window_df = history_df.tail(cfg.lookback)
+    pipeline = build_features(list(cfg.extra_features))
+    enriched = apply_features(pipeline, window_df, history_df)
+    cols = list(cfg.extra_features)
+    missing = [c for c in cols if c not in enriched.columns]
+    if missing:
+        raise ValueError(
+            f"feature pipeline did not produce expected columns {missing}; "
+            f"got {list(enriched.columns)}"
+        )
+    return enriched.loc[:, cols].to_numpy(dtype=np.float32, copy=True)
 
 
 def pack_observation(

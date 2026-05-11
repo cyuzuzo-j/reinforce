@@ -15,6 +15,7 @@ class EnvConfig:
     invalid_action_penalty: float = 0.0
     price_eps: float = 1e-6
     seed: int | None = None
+    extra_features: tuple[str, ...] = ()
 
     @property
     def fee_rate(self) -> float:
