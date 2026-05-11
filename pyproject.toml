@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polymarket_gym"
+version = "0.1.0"
+description = "Gymnasium environment for Polymarket directional trading."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "gymnasium>=0.29",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pyarrow>=15",
+    "duckdb>=1.0",
+    "huggingface_hub>=0.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+]
+
+[tool.setuptools.packages.find]
+include = ["polymarket_gym*"]
+exclude = ["tests*", "scripts*", "data*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "error::DeprecationWarning:polymarket_gym.*",
+]
