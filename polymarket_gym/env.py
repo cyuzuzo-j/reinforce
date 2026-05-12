@@ -38,7 +38,11 @@ class PolymarketDirectionalEnv(gym.Env):
         self.cfg = config if config is not None else EnvConfig()
         self.feed = feed
         self.venue = venue if venue is not None else SimulatedVenue()
-        self.action_space = spaces.Discrete(3)
+        self.action_space = spaces.Discrete(self.cfg.n_action_levels)
+        self._action_fracs = [
+            i / max(self.cfg.n_action_levels - 1, 1)
+            for i in range(self.cfg.n_action_levels)
+        ]
         self.observation_space = build_observation_space(self.cfg)
 
         self._rng: np.random.Generator = np.random.default_rng(self.cfg.seed)
@@ -100,15 +104,16 @@ class PolymarketDirectionalEnv(gym.Env):
         if self._terminated:
             raise RuntimeError("step() called on a terminated episode; call reset() first")
         action = int(action)
-        if action not in (0, 1, 2):
-            raise ValueError(f"action must be in {{0,1,2}}, got {action}")
+        if not (0 <= action < self.cfg.n_action_levels):
+            raise ValueError(f"action must be in [0, {self.cfg.n_action_levels}), got {action}")
 
         next_bar = self.feed.advance()
         if next_bar is None:
             return self._finalize_episode()
 
+        target_frac = self._action_fracs[action]
         fill = self.venue.submit(
-            action=action,
+            target_frac=target_frac,
             next_bar=next_bar,
             position_tokens=self._position_tokens,
             cash=self._cash,

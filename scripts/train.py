@@ -77,6 +77,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--checkpoint-freq", type=int, default=50_000)
     p.add_argument("--eval-freq", type=int, default=20_000)
     p.add_argument("--n-eval-episodes", type=int, default=20)
+    p.add_argument("--n-action-levels", type=int, default=7)
+    p.add_argument("--min-spread-bps", type=float, default=50.0)
+    p.add_argument("--spread-vol-factor", type=float, default=2.0)
     p.add_argument("--subproc", action="store_true", help="use SubprocVecEnv")
     p.add_argument("--extra-features", type=str, nargs="+", default=[])
     p.add_argument(
@@ -141,6 +144,9 @@ def main(argv: list[str] | None = None) -> int:
         "initial_cash": args.initial_cash,
         "fee_bps": args.fee_bps,
         "invalid_action_penalty": args.invalid_action_penalty,
+        "n_action_levels": args.n_action_levels,
+        "min_spread_bps": args.min_spread_bps,
+        "spread_vol_factor": args.spread_vol_factor,
         # Training
         "total_timesteps": args.total_timesteps,
         "n_envs": args.n_envs,
@@ -170,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     args.net_arch_pi = wc.get("net_arch_pi", args.net_arch_pi)
     args.net_arch_vf = wc.get("net_arch_vf", args.net_arch_vf)
     args.cnn_channels = wc.get("cnn_channels", args.cnn_channels)
+    args.n_action_levels = wc.get("n_action_levels", args.n_action_levels)
+    args.min_spread_bps = wc.get("min_spread_bps", args.min_spread_bps)
+    args.spread_vol_factor = wc.get("spread_vol_factor", args.spread_vol_factor)
 
     cfg = EnvConfig(
         bar_size=args.bar_size,
@@ -180,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
         invalid_action_penalty=args.invalid_action_penalty,
         seed=args.seed,
         extra_features=tuple(args.extra_features),
+        n_action_levels=args.n_action_levels,
+        min_spread_bps=args.min_spread_bps,
+        spread_vol_factor=args.spread_vol_factor,
     )
 
     loader = MarketLoader(markets_path, quant_path)

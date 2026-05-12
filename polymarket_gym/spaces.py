@@ -143,7 +143,10 @@ def pack_observation(
     cfg: EnvConfig,
 ) -> dict:
     window = _window_from_history(history, cfg)
-    position_frac = 1.0 if position_tokens > 0.0 else 0.0
+    position_frac = (
+        float(min(max((portfolio_value - cash) / portfolio_value, 0.0), 1.0))
+        if portfolio_value > 1e-6 else 0.0
+    )
     cash_frac = float(cash / cfg.initial_cash) if cfg.initial_cash > 0 else 0.0
     pv_norm = float(portfolio_value / cfg.initial_cash) if cfg.initial_cash > 0 else 0.0
     if total_bars > 0:

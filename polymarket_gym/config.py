@@ -16,6 +16,9 @@ class EnvConfig:
     price_eps: float = 1e-6
     seed: int | None = None
     extra_features: tuple[str, ...] = ()
+    n_action_levels: int = 7        # Discrete(N): fracs evenly spaced in [0, 1]
+    min_spread_bps: float = 50.0    # floor half-spread in bps (50 bps = 0.5%)
+    spread_vol_factor: float = 2.0  # half_spread = factor / sqrt(volume_usd + 1)
 
     @property
     def fee_rate(self) -> float:
