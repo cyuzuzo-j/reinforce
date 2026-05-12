@@ -12,7 +12,7 @@ Usage:
     python scripts/sweep.py --sweep-id <SWEEP_ID>
 
     # Customise the number of runs per agent / per-trial budget:
-    python scripts/sweep.py --count 30 --total-timesteps 100000
+    python scripts/sweep.py --count 30 --total-timesteps 500000
 
 Each agent trial calls ``train.main`` in-process so that the wandb run created
 by ``train.py`` IS the sweep trial's run — bayesian optimization and hyperband
@@ -26,83 +26,86 @@ import sys
 
 import wandb
 
-# Make project root + scripts/ importable so `import train` works regardless
-# of the caller's CWD.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_HERE)
 for _p in (_PROJECT_ROOT, _HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# ── Sweep configuration ─────────────────────────────────────────────────────
+# ── Sweep configuration ──────────────────────────────────────────────────────
+#
+# Design rationale:
+#   - Metric: eval/mean_reward (deterministic EvalCallback, 20 episodes) is far
+#     less noisy than rollout/ep_rew_mean. The prior sweep optimised on training
+#     noise, causing a 4.7M "winner" that was almost certainly a lucky rollout.
+#   - Search space: narrowed around the top-3 region from sweep-0tyudesk.
+#     batch_size is fixed at 256 (strong prior across all good runs).
+#   - Hyperband min_iter=5: first cull after 5 eval checkpoints (~100K steps at
+#     eval_freq=20K), giving runs enough time to warm up before pruning.
+#
 SWEEP_CONFIG = {
-    "name": "polymarket-ppo-sweep",
-    "method": "bayes",  # bayesian optimisation > random for sample-efficiency
+    "name": "polymarket-ppo-v2",
+    "method": "bayes",
     "metric": {
-        "name": "rollout/ep_rew_mean",
+        "name": "eval/mean_reward",
         "goal": "maximize",
     },
     "parameters": {
-        # ── PPO core hypers ──────────────────────────────────────────────
+        # ── PPO core ──────────────────────────────────────────────────────
         "learning_rate": {
             "distribution": "log_uniform_values",
             "min": 1e-5,
             "max": 1e-2,
         },
         "n_steps": {
-            "values": [512, 1024, 2048, 4096],
-        },
-        "batch_size": {
-            "values": [64, 128, 256, 512],
+            "values": [2048, 4096],
         },
         "gamma": {
             "distribution": "uniform",
-            "min": 0.9,
-            "max": 0.999,
+            "min": 0.93,
+            "max": 0.99,
         },
         "gae_lambda": {
             "distribution": "uniform",
-            "min": 0.8,
-            "max": 1.0,
+            "min": 0.82,
+            "max": 0.97,
         },
         "ent_coef": {
             "distribution": "log_uniform_values",
-            "min": 1e-4,
-            "max": 0.1,
+            "min": 1e-3,
+            "max": 0.15,
         },
         "clip_range": {
-            "values": [0.1, 0.2, 0.3],
+            "values": [0.1, 0.2],
         },
         "n_epochs": {
-            "values": [3, 5, 10, 15, 20],
+            "values": [10, 15, 20],
         },
-        # ── Network architecture ─────────────────────────────────────────
+        # ── Architecture ──────────────────────────────────────────────────
         "features_dim": {
-            "values": [64, 128, 256],
+            "values": [64, 128],
         },
         "cnn_channels": {
-            "values": [16, 32, 64],
+            "values": [32, 64],
         },
         "net_arch_pi": {
-            "values": [[64, 64], [128, 128], [256, 128], [128, 64]],
+            "values": [[128, 64], [128, 128], [256, 128]],
         },
         "net_arch_vf": {
-            "values": [[64, 64], [128, 128], [256, 128], [128, 64]],
+            "values": [[128, 64], [128, 128], [256, 128]],
         },
     },
-    # Early-terminate runs that plateau (works in-process — the agent kills
-    # the trial by signalling the run; sb3+WandbCallback then exit).
     "early_terminate": {
         "type": "hyperband",
-        "min_iter": 3,
-        "eta": 3,
+        "min_iter": 5,   # first cull after 5 eval checkpoints (~100K steps)
+        "eta": 3,        # keep top 1/3 at each rung
     },
 }
 
-
-# Mutated by main() so train_fn closures pick up CLI overrides.
 _TRIAL_ARGS = {
-    "total_timesteps": 200_000,
+    "total_timesteps": 500_000,
+    "n_eval_episodes": 20,
+    "eval_freq": 20_000,
     "data_dir": os.path.join(_PROJECT_ROOT, "data"),
     "wandb_project": "polymarket-rl",
     "wandb_entity": None,
@@ -110,17 +113,14 @@ _TRIAL_ARGS = {
 
 
 def _trial_argv() -> list[str]:
-    """Argv handed to ``train.main`` for a single sweep trial.
-
-    Only the knobs that ``train.py`` does *not* read from ``wandb.config``
-    need to be set here. The sampled hyperparameters in ``SWEEP_CONFIG``
-    flow into the trial's wandb run via ``WANDB_SWEEP_ID`` and are picked
-    up by ``train.py`` through its ``wandb.config.get(...)`` overrides.
-    """
     argv = [
         "--total-timesteps", str(_TRIAL_ARGS["total_timesteps"]),
+        "--n-eval-episodes", str(_TRIAL_ARGS["n_eval_episodes"]),
+        "--eval-freq", str(_TRIAL_ARGS["eval_freq"]),
         "--data-dir", _TRIAL_ARGS["data_dir"],
         "--wandb-project", _TRIAL_ARGS["wandb_project"],
+        # batch_size fixed — strong prior from prior sweep
+        "--batch-size", "256",
     ]
     if _TRIAL_ARGS["wandb_entity"]:
         argv.extend(["--wandb-entity", _TRIAL_ARGS["wandb_entity"]])
@@ -128,15 +128,6 @@ def _trial_argv() -> list[str]:
 
 
 def train_fn() -> None:
-    """wandb.agent callback — runs one sweep trial in-process.
-
-    Importantly we do *not* call ``wandb.init`` here: ``train.py`` does it
-    itself, and when invoked from within a sweep agent's call frame, that
-    init picks up ``WANDB_SWEEP_ID`` from the environment and creates a
-    run associated with the sweep. The trial's sampled hyperparameters
-    land in ``wandb.config``, which train.py reads to override its CLI
-    defaults (see the ``wc.get(...)`` block in train.py).
-    """
     import train  # scripts/train.py — on sys.path via the prelude above
 
     argv = _trial_argv()
@@ -144,7 +135,6 @@ def train_fn() -> None:
     try:
         rc = train.main(argv)
     except Exception as e:
-        # Surface the failure on the trial's wandb run, if still alive.
         if wandb.run is not None:
             wandb.log({"sweep/error": 1, "sweep/error_msg": str(e)[:240]})
         raise
@@ -154,47 +144,19 @@ def train_fn() -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument(
-        "--project",
-        type=str,
-        default="polymarket-rl",
-        help="wandb project name",
-    )
-    p.add_argument(
-        "--entity",
-        type=str,
-        default=None,
-        help="wandb entity (team/user)",
-    )
-    p.add_argument(
-        "--sweep-id",
-        type=str,
-        default=None,
-        help="Attach to an existing sweep instead of creating a new one.",
-    )
-    p.add_argument(
-        "--count",
-        type=int,
-        default=20,
-        help="Number of trials this agent will execute (default: 20).",
-    )
-    p.add_argument(
-        "--create-only",
-        action="store_true",
-        help="Create the sweep and print the ID, but don't start an agent.",
-    )
-    p.add_argument(
-        "--total-timesteps",
-        type=int,
-        default=_TRIAL_ARGS["total_timesteps"],
-        help="Per-trial training budget (default: %(default)s).",
-    )
-    p.add_argument(
-        "--data-dir",
-        type=str,
-        default=_TRIAL_ARGS["data_dir"],
-        help="Path passed as --data-dir to each trial's train.py.",
-    )
+    p.add_argument("--project", type=str, default="polymarket-rl")
+    p.add_argument("--entity", type=str, default=None)
+    p.add_argument("--sweep-id", type=str, default=None,
+                   help="Attach to an existing sweep instead of creating a new one.")
+    p.add_argument("--count", type=int, default=30,
+                   help="Number of trials this agent will execute (default: 30).")
+    p.add_argument("--create-only", action="store_true",
+                   help="Create the sweep and print the ID, but don't start an agent.")
+    p.add_argument("--total-timesteps", type=int, default=_TRIAL_ARGS["total_timesteps"],
+                   help="Per-trial training budget (default: %(default)s).")
+    p.add_argument("--n-eval-episodes", type=int, default=_TRIAL_ARGS["n_eval_episodes"],
+                   help="Eval episodes per checkpoint (default: %(default)s).")
+    p.add_argument("--data-dir", type=str, default=_TRIAL_ARGS["data_dir"])
     return p.parse_args()
 
 
@@ -202,6 +164,7 @@ def main() -> int:
     args = parse_args()
 
     _TRIAL_ARGS["total_timesteps"] = args.total_timesteps
+    _TRIAL_ARGS["n_eval_episodes"] = args.n_eval_episodes
     _TRIAL_ARGS["data_dir"] = args.data_dir
     _TRIAL_ARGS["wandb_project"] = args.project
     _TRIAL_ARGS["wandb_entity"] = args.entity

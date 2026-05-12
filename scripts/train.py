@@ -76,6 +76,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--cnn-channels", type=int, default=64)
     p.add_argument("--checkpoint-freq", type=int, default=50_000)
     p.add_argument("--eval-freq", type=int, default=20_000)
+    p.add_argument("--n-eval-episodes", type=int, default=20)
     p.add_argument("--subproc", action="store_true", help="use SubprocVecEnv")
     p.add_argument("--extra-features", type=str, nargs="+", default=[])
     p.add_argument(
@@ -267,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         log_path=str(out_dir / "eval_log"),
         eval_freq=max(args.eval_freq // max(args.n_envs, 1), 1),
         deterministic=True,
-        n_eval_episodes=3,
+        n_eval_episodes=args.n_eval_episodes,
     )
     # In a sweep, skip model artifact uploads — they balloon storage for
     # little value when only the metric matters.
