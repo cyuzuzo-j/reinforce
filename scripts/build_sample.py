@@ -26,6 +26,9 @@ from huggingface_hub import hf_hub_download
 
 import duckdb
 import pandas as pd
+import os
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from polymarket_gym.data import parse_outcome_prices
 
@@ -110,16 +113,39 @@ def _filter_markets(markets_path: Path, top_n: int, min_volume: float) -> pd.Dat
 
 def _try_remote_quant(market_ids: list[str], out_path: Path, timeout_sec: int) -> bool:
     logger.info("attempting remote DuckDB over httpfs (predicate pushdown)")
+    import requests
+    
+    # Try to get a direct URL to bypass redirect issues in DuckDB
+    # and use the HF_TOKEN if available.
+    token = os.environ.get("HF_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    
+    try:
+        r = requests.head(REMOTE_QUANT_URL, headers=headers, allow_redirects=True, timeout=10)
+        direct_url = r.url
+        if r.status_code != 200:
+            logger.warning("could not reach remote quant file (status %d)", r.status_code)
+            return False
+    except Exception as e:
+        logger.warning("failed to pre-resolve remote URL: %s", e)
+        direct_url = REMOTE_QUANT_URL
+
     con = duckdb.connect()
     try:
+        con.execute("SET http_timeout = 300;")
+        con.execute("SET http_retries = 3;")
+        con.execute("SET http_keep_alive = false;")
+        con.execute("SET allow_asterisks_in_http_paths = true;") # Required for signed AWS/CDN URLs
         con.execute("INSTALL httpfs; LOAD httpfs;")
+            
     except duckdb.Error as e:
-        logger.warning("httpfs unavailable: %s", e)
+        logger.warning("httpfs unavailable or failed to load: %s", e)
         con.close()
         return False
+
     placeholders = ",".join(["?"] * len(market_ids))
     sql = (
-        f"COPY (SELECT * FROM read_parquet('{REMOTE_QUANT_URL}') "
+        f"COPY (SELECT * FROM read_parquet('{direct_url}') "
         f"WHERE market_id IN ({placeholders})) "
         f"TO '{out_path}' (FORMAT 'parquet')"
     )
@@ -128,13 +154,15 @@ def _try_remote_quant(market_ids: list[str], out_path: Path, timeout_sec: int) -
     try:
         con.execute(sql, params)
     except duckdb.Error as e:
-        logger.warning("remote DuckDB failed: %s", e)
+        logger.warning("remote DuckDB query failed: %s", e)
         return False
     finally:
         con.close()
+    
     elapsed = time.monotonic() - start
     if elapsed > timeout_sec:
         logger.warning("remote DuckDB took %.0fs (> %ds budget)", elapsed, timeout_sec)
+    
     return out_path.exists()
 
 
@@ -187,8 +215,8 @@ def main(argv: list[str] | None = None) -> int:
     market_ids = filtered["market_id"].astype(str).tolist()
     quant_out = out_dir / "quant_sample.parquet"
     ok = False
-    if not args.no_remote:
-        ok = _try_remote_quant(market_ids, quant_out, args.remote_timeout_sec)
+    #if not args.no_remote:
+    #    ok = _try_remote_quant(market_ids, quant_out, args.remote_timeout_sec)
     if not ok:
         cache_dir = Path(os.environ.get("HF_HUB_CACHE", out_dir / ".hf_cache"))
         _local_quant_filter(market_ids, quant_out, cache_dir)

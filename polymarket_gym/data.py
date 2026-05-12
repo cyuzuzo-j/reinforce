@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -11,6 +12,8 @@ import numpy as np
 import pandas as pd
 
 from polymarket_gym.config import EnvConfig
+
+_log = logging.getLogger(__name__)
 
 
 def parse_outcome_prices(raw: str | list | tuple) -> tuple[float, float]:
@@ -194,19 +197,17 @@ class MarketLoader:
         mask &= df["closed"].astype(bool)
         mask &= df["end_date"].notna()
         eligible = df.loc[mask, "market_id"].astype(str).tolist()
-        # Additional bar-count gating happens lazily in load_trades+build_bars callers
-        # because it requires the actual trade history.
         return eligible
 
     def load_trades(self, market_id: str) -> pd.DataFrame:
         query = (
-            "SELECT datetime, price, usd_amount, token_amount "
-            "FROM read_parquet(?) WHERE market_id = ? ORDER BY datetime"
+            "SELECT timestamp AS datetime, price, usd_amount, token_amount "
+            "FROM read_parquet(?) WHERE market_id = ? ORDER BY timestamp"
         )
         df = self._con.execute(query, [str(self.quant_path), str(market_id)]).fetch_df()
         if df.empty:
             return df
-        df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+        df["datetime"] = pd.to_datetime(df["datetime"], unit="s", utc=True)
         return df
 
     def load_meta(self, market_id: str) -> dict:

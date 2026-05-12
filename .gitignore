@@ -9,3 +9,7 @@ htmlcov/
 build/
 dist/
 *.pyc
+.flash/
+runs/
+wandb/
+deploy_output.txt

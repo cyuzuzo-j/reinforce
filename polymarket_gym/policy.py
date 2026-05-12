@@ -5,9 +5,12 @@ import torch
 import torch.nn as nn
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
+import jax.numpy as jnp
+import flax.linen as fnn
+
 
 class PolicyFeatures(BaseFeaturesExtractor):
-    """Conv1d over the window + MLP over scalars, fused into one feature vector."""
+    """Conv1d over the window + MLP over scalars, fused into one feature vector (PyTorch)."""
 
     def __init__(
         self,
@@ -44,3 +47,39 @@ class PolicyFeatures(BaseFeaturesExtractor):
         x = self.cnn(x)
         x = torch.cat([x.mean(dim=2), x.amax(dim=2)], dim=1)
         return self.fuse(torch.cat([x, scalars], dim=1))
+
+
+class FlaxPolicyFeatures(fnn.Module):
+    """Conv1d over the window + MLP over scalars, fused into one feature vector (Flax/SBX)."""
+    features_dim: int
+    activation_fn: callable
+    lookback: int
+    n_window_features: int
+    n_scalars: int
+    cnn_channels: int = 32
+
+    @fnn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        # Gymnasium FlattenObservation sorts dict keys alphabetically.
+        # "scalars" comes before "window".
+        scalars = x[:, :self.n_scalars]
+        window = x[:, self.n_scalars:].reshape(-1, self.lookback, self.n_window_features)
+
+        # Flax Conv default is (batch, steps, features) i.e. channels_last
+        c = fnn.Conv(features=self.cnn_channels, kernel_size=(3,), padding=1)(window)
+        c = fnn.relu(c)
+        c = fnn.Conv(features=self.cnn_channels, kernel_size=(3,), padding=1)(c)
+        c = fnn.relu(c)
+        
+        c_mean = jnp.mean(c, axis=1)
+        c_max = jnp.max(c, axis=1)
+        
+        fuse_in = jnp.concatenate([c_mean, c_max, scalars], axis=1)
+        
+        # Dense
+        f = fnn.Dense(self.features_dim)(fuse_in)
+        f = fnn.relu(f)
+        f = fnn.Dense(self.features_dim)(f)
+        f = fnn.relu(f)
+        
+        return f

@@ -15,6 +15,9 @@ from polymarket_gym.execution import SimulatedVenue
 from polymarket_gym.feed import HistoricalFeed
 
 
+from polymarket_gym.feed import _InsufficientBarsError
+
+
 class _RandomMarketWrapper(gym.Wrapper):
     """On every reset, picks a random market_id from the allowed list."""
 
@@ -27,9 +30,17 @@ class _RandomMarketWrapper(gym.Wrapper):
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         opts = dict(options) if options else {}
-        if "market_id" not in opts:
-            opts["market_id"] = str(self._rng.choice(self._market_ids))
-        return self.env.reset(seed=seed, options=opts)
+        if "market_id" in opts:
+            return self.env.reset(seed=seed, options=opts)
+        # Random selection with retry on insufficient bars.
+        while self._market_ids:
+            chosen = str(self._rng.choice(self._market_ids))
+            opts["market_id"] = chosen
+            try:
+                return self.env.reset(seed=seed, options=opts)
+            except _InsufficientBarsError:
+                self._market_ids.remove(chosen)
+        raise RuntimeError("all markets in split have insufficient bars")
 
 
 def make_env(
@@ -47,6 +58,7 @@ def make_env(
         feed = HistoricalFeed(loader, cfg)
         env = PolymarketDirectionalEnv(config=cfg, feed=feed, venue=SimulatedVenue())
         env = _RandomMarketWrapper(env, market_ids, seed=seed)
+        env = gym.wrappers.FlattenObservation(env)
         if monitor_dir is not None:
             Path(monitor_dir).mkdir(parents=True, exist_ok=True)
             env = Monitor(env, filename=str(Path(monitor_dir) / f"monitor_{seed}"))

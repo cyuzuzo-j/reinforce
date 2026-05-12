@@ -13,6 +13,54 @@ import matplotlib.pyplot as plt  # noqa: E402
 from stable_baselines3.common.callbacks import BaseCallback  # noqa: E402
 
 
+class StepRewardLoggerCallback(BaseCallback):
+    """Logs per-step reward (and running episode return) to wandb every step.
+
+    SB3's default logger only dumps once per rollout — for shorter trials or
+    debugging this hides the moment-to-moment signal. This callback pushes a
+    scalar to wandb on every env step (averaged across vec sub-envs).
+    """
+
+    def __init__(self, log_every: int = 1, verbose: int = 0) -> None:
+        super().__init__(verbose)
+        self._log_every = max(1, int(log_every))
+        self._step = 0
+        self._ep_returns: np.ndarray | None = None
+
+    def _on_step(self) -> bool:
+        import wandb
+
+        if wandb.run is None:
+            return True
+
+        rewards = self.locals.get("rewards")
+        dones = self.locals.get("dones")
+        if rewards is None:
+            return True
+
+        rewards = np.asarray(rewards, dtype=np.float64)
+        if self._ep_returns is None or self._ep_returns.shape != rewards.shape:
+            self._ep_returns = np.zeros_like(rewards)
+        self._ep_returns += rewards
+
+        payload: dict[str, float] = {
+            "step/reward_mean": float(rewards.mean()),
+            "step/reward_sum": float(rewards.sum()),
+        }
+        if dones is not None:
+            dones_arr = np.asarray(dones)
+            if dones_arr.any():
+                finished = self._ep_returns[dones_arr]
+                payload["step/episode_return_last"] = float(finished[-1])
+                payload["step/episode_return_mean"] = float(finished.mean())
+                self._ep_returns[dones_arr] = 0.0
+
+        self._step += 1
+        if self._step % self._log_every == 0:
+            wandb.log(payload, step=self.num_timesteps)
+        return True
+
+
 class EpisodeCounterCallback(BaseCallback):
     """Counts completed episodes across all sub-envs of a VecEnv."""
 

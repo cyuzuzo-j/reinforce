@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Iterable, Protocol, runtime_checkable
 
@@ -8,6 +9,17 @@ import pandas as pd
 
 from polymarket_gym.config import EnvConfig
 from polymarket_gym.data import MarketLoader, build_bars
+
+_log = logging.getLogger(__name__)
+
+
+class _InsufficientBarsError(Exception):
+    """Raised internally when a market has too few bars for an episode."""
+
+    def __init__(self, market_id: str, n_bars: int) -> None:
+        super().__init__(f"market {market_id!r}: {n_bars} bars")
+        self.market_id = market_id
+        self.n_bars = n_bars
 
 
 @dataclass(frozen=True)
@@ -85,11 +97,38 @@ class HistoricalFeed:
         ids = self.eligible_market_ids()
         if not ids:
             raise RuntimeError("no eligible markets in loader")
-        if market_id is None:
-            market_id = str(rng.choice(ids))
-        elif market_id not in ids:
-            raise ValueError(f"market_id {market_id!r} not eligible")
 
+        # If the caller explicitly requested a specific market, try it once.
+        if market_id is not None:
+            if market_id not in ids:
+                raise ValueError(f"market_id {market_id!r} not eligible")
+            return self._try_reset_market(market_id)
+
+        # Random selection: retry if a market has too few bars.
+        tried: set[str] = set()
+        while True:
+            remaining = [mid for mid in ids if mid not in tried]
+            if not remaining:
+                raise RuntimeError(
+                    f"all {len(ids)} eligible markets have < "
+                    f"{self._cfg.min_bars_per_episode} bars"
+                )
+            chosen = str(rng.choice(remaining))
+            try:
+                return self._try_reset_market(chosen)
+            except _InsufficientBarsError:
+                tried.add(chosen)
+                # Also evict from the cached eligible list so future
+                # resets don't keep trying this market.
+                if self._eligible_cache is not None and chosen in self._eligible_cache:
+                    self._eligible_cache.remove(chosen)
+
+    def _try_reset_market(self, market_id: str) -> MarketMeta:
+        """Load trades, build bars, and prepare state for *market_id*.
+
+        Raises ``_InsufficientBarsError`` (internal) if the market doesn't
+        produce enough bars, or ``RuntimeError`` for other failures.
+        """
         meta_dict = self._loader.load_meta(market_id)
         trades = self._loader.load_trades(market_id)
         bars_df = build_bars(
@@ -99,10 +138,11 @@ class HistoricalFeed:
             price_eps=self._cfg.price_eps,
         )
         if len(bars_df) < self._cfg.min_bars_per_episode:
-            raise RuntimeError(
-                f"market {market_id!r} has {len(bars_df)} bars, "
-                f"need >= {self._cfg.min_bars_per_episode}"
+            _log.warning(
+                "market %s has %d bars (need >= %d), skipping",
+                market_id, len(bars_df), self._cfg.min_bars_per_episode,
             )
+            raise _InsufficientBarsError(market_id, len(bars_df))
 
         self._bars = _bars_df_to_list(bars_df)
         self._cursor = self._cfg.lookback

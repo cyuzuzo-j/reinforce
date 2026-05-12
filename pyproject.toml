@@ -23,10 +23,11 @@ dev = [
     "pytest-cov>=5",
 ]
 train = [
+    "sbx-rl>=0.26",
     "stable-baselines3>=2.4",
     "torch>=2.2",
     "matplotlib>=3.8",
-    "tensorboard>=2.16",
+    "wandb>=0.16",
 ]
 
 [tool.setuptools.packages.find]

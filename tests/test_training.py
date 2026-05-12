@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from polymarket_gym.config import EnvConfig
-from polymarket_gym.policy import PolicyFeatures
+from polymarket_gym.policy import FlaxPolicyFeatures
 from polymarket_gym.spaces import build_observation_space
 from polymarket_gym.training.callbacks import (
     EpisodeCounterCallback,
@@ -70,14 +70,30 @@ def test_chronological_split_rejects_empty_train():
 
 
 def test_policy_features_forward_shape():
+    import jax
+    import jax.numpy as jnp
+    from polymarket_gym.policy import FlaxPolicyFeatures
+
     cfg = EnvConfig(lookback=16)
     obs_space = build_observation_space(cfg)
-    extractor = PolicyFeatures(obs_space, features_dim=64)
-    batch = {
-        "window": torch.randn(4, 16, 7),
-        "scalars": torch.randn(4, 4),
-    }
-    out = extractor(batch)
+    
+    n_scalars = obs_space.spaces["scalars"].shape[0]
+    n_window_features = obs_space.spaces["window"].shape[1]
+    
+    extractor = FlaxPolicyFeatures(
+        features_dim=64, 
+        activation_fn=lambda x: x, 
+        lookback=16, 
+        n_window_features=n_window_features,
+        n_scalars=n_scalars
+    )
+    
+    # 1D flattened observation (B, n_scalars + lookback * n_window_features)
+    flat_dim = n_scalars + 16 * n_window_features
+    batch = jnp.ones((4, flat_dim))
+    
+    params = extractor.init(jax.random.PRNGKey(0), batch)
+    out = extractor.apply(params, batch)
     assert out.shape == (4, 64)
 
 
