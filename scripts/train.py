@@ -19,6 +19,7 @@ from stable_baselines3.common.callbacks import (
     CheckpointCallback,
     EvalCallback,
 )
+from stable_baselines3.common.vec_env import VecNormalize
 from wandb.integration.sb3 import WandbCallback
 
 import os
@@ -31,12 +32,13 @@ from polymarket_gym.config import EnvConfig
 from polymarket_gym.data import MarketLoader
 from polymarket_gym.policy import FlaxPolicyFeatures
 from polymarket_gym.training.callbacks import (
+    CurriculumEvalCallback,
     EpisodeCounterCallback,
     StepRewardLoggerCallback,
     VisualizationCallback,
 )
 from polymarket_gym.training.env_factory import make_env, make_vec_env
-from polymarket_gym.training.splits import chronological_split
+from polymarket_gym.training.splits import chronological_split, curriculum_split
 
 logger = logging.getLogger("train")
 
@@ -47,7 +49,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--markets-file", type=str, default="markets.parquet")
     p.add_argument("--quant-file", type=str, default="quant_sample.parquet")
     p.add_argument("--total-timesteps", type=int, default=2_000_000)
-    p.add_argument("--n-envs", type=int, default=32)
+    p.add_argument("--n-envs", type=int, default=16)
     p.add_argument("--viz-every-n-episodes", type=int, default=50)
     p.add_argument("--eval-frac", type=float, default=0.2)
     p.add_argument(
@@ -82,6 +84,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--spread-vol-factor", type=float, default=2.0)
     p.add_argument("--subproc", action="store_true", help="use SubprocVecEnv")
     p.add_argument("--extra-features", type=str, nargs="+", default=[])
+    # Fee warmup
+    p.add_argument("--fee-warmup-episodes", type=int, default=0,
+                   help="low-fee episodes per sub-env before full fees (0=disabled)")
+    p.add_argument("--fee-warmup-bps", type=float, default=5.0,
+                   help="min_spread_bps during warmup")
+    # Curriculum
+    p.add_argument("--curriculum", action="store_true",
+                   help="enable curriculum learning (stage markets by directional conviction)")
+    p.add_argument("--stage1-conviction", type=float, default=0.35,
+                   help="|yes_payoff - initial_close| threshold for stage 1 (easiest)")
+    p.add_argument("--stage2-conviction", type=float, default=0.15,
+                   help="|yes_payoff - initial_close| threshold for stage 2")
+    p.add_argument("--stage1-threshold", type=float, default=0.5,
+                   help="rolling eval reward needed to graduate from stage 1")
+    p.add_argument("--stage2-threshold", type=float, default=2.0,
+                   help="rolling eval reward needed to graduate from stage 2")
+    p.add_argument("--max-steps-per-stage", type=int, default=300_000,
+                   help="force-promote after this many steps if threshold not met (0=disabled)")
     p.add_argument(
         "--wandb-project",
         type=str,
@@ -151,6 +171,16 @@ def main(argv: list[str] | None = None) -> int:
         "total_timesteps": args.total_timesteps,
         "n_envs": args.n_envs,
         "seed": args.seed,
+        # Fee warmup
+        "fee_warmup_episodes": args.fee_warmup_episodes,
+        "fee_warmup_bps": args.fee_warmup_bps,
+        # Curriculum
+        "curriculum": args.curriculum,
+        "stage1_conviction": args.stage1_conviction,
+        "stage2_conviction": args.stage2_conviction,
+        "stage1_threshold": args.stage1_threshold,
+        "stage2_threshold": args.stage2_threshold,
+        "max_steps_per_stage": args.max_steps_per_stage,
     }
 
     run = wandb.init(
@@ -160,8 +190,10 @@ def main(argv: list[str] | None = None) -> int:
         sync_tensorboard=False,
         save_code=True,
     )
-    is_sweep = bool(getattr(run, "sweep_id", None))
-
+    try:
+        is_sweep = run.sweep is not None
+    except:
+        is_sweep= False
     # Allow wandb sweep to override CLI args
     wc = wandb.config
     args.learning_rate = wc.get("learning_rate", args.learning_rate)
@@ -179,6 +211,12 @@ def main(argv: list[str] | None = None) -> int:
     args.n_action_levels = wc.get("n_action_levels", args.n_action_levels)
     args.min_spread_bps = wc.get("min_spread_bps", args.min_spread_bps)
     args.spread_vol_factor = wc.get("spread_vol_factor", args.spread_vol_factor)
+    args.fee_warmup_episodes = wc.get("fee_warmup_episodes", args.fee_warmup_episodes)
+    args.fee_warmup_bps = wc.get("fee_warmup_bps", args.fee_warmup_bps)
+    args.stage1_conviction = wc.get("stage1_conviction", args.stage1_conviction)
+    args.stage2_conviction = wc.get("stage2_conviction", args.stage2_conviction)
+    args.stage1_threshold = wc.get("stage1_threshold", args.stage1_threshold)
+    args.stage2_threshold = wc.get("stage2_threshold", args.stage2_threshold)
 
     cfg = EnvConfig(
         bar_size=args.bar_size,
@@ -197,28 +235,64 @@ def main(argv: list[str] | None = None) -> int:
     loader = MarketLoader(markets_path, quant_path)
     try:
         train_ids, eval_ids = chronological_split(loader, cfg, eval_frac=args.eval_frac)
+        logger.info("split: %d train markets, %d eval markets", len(train_ids), len(eval_ids))
+        curriculum_stages = None
+        if args.curriculum:
+            curriculum_stages = curriculum_split(
+                loader,
+                cfg,
+                train_ids,
+                stage1_conviction=args.stage1_conviction,
+                stage2_conviction=args.stage2_conviction,
+            )
+            initial_train_ids = curriculum_stages.stage1
+            logger.info(
+                "curriculum enabled: starting with %d stage-1 markets (conviction>=%.2f)",
+                len(initial_train_ids), curriculum_stages.stage1_conviction_used,
+            )
+        else:
+            initial_train_ids = train_ids
     finally:
         loader.close()
-    logger.info("split: %d train markets, %d eval markets", len(train_ids), len(eval_ids))
 
     train_env = make_vec_env(
         markets_path,
         quant_path,
         cfg,
-        train_ids,
+        initial_train_ids,
         n_envs=args.n_envs,
         seed=args.seed,
         monitor_dir=out_dir / "monitor",
         subproc=args.subproc,
+        fee_warmup_episodes=args.fee_warmup_episodes,
+        fee_warmup_bps=args.fee_warmup_bps,
     )
-    eval_env = make_vec_env(
-        markets_path,
-        quant_path,
-        cfg,
-        eval_ids,
-        n_envs=1,
-        seed=args.seed + 10_000,
-        monitor_dir=out_dir / "monitor_eval",
+    # Normalize rewards so PPO sees a stable per-step scale instead of a mix
+    # of near-zero mid-episode log-returns and a large terminal settlement hit.
+    # The Monitor wrapper is inside VecNormalize, so ep_info_buffer still holds
+    # the raw log-return totals that are reported to wandb as ep_rew_mean.
+    train_env = VecNormalize(
+        train_env,
+        norm_obs=False,
+        norm_reward=True,
+        clip_reward=10.0,
+        gamma=args.gamma,
+    )
+    eval_env = VecNormalize(
+        make_vec_env(
+            markets_path,
+            quant_path,
+            cfg,
+            eval_ids,
+            n_envs=1,
+            seed=args.seed + 10_000,
+            monitor_dir=out_dir / "monitor_eval",
+        ),
+        norm_obs=False,
+        norm_reward=True,
+        clip_reward=10.0,
+        gamma=args.gamma,
+        training=False,  # never updates stats; receives them via sync_envs_normalization
     )
 
     # Since the env is now wrapped with FlattenObservation, observation space is a Box.
@@ -274,14 +348,29 @@ def main(argv: list[str] | None = None) -> int:
         save_path=str(out_dir / "ckpt"),
         name_prefix="ppo",
     )
-    eval_cb = EvalCallback(
-        eval_env,
+    eval_cb_kwargs = dict(
+        eval_env=eval_env,
         best_model_save_path=str(out_dir / "ckpt"),
         log_path=str(out_dir / "eval_log"),
         eval_freq=max(args.eval_freq // max(args.n_envs, 1), 1),
         deterministic=True,
         n_eval_episodes=args.n_eval_episodes,
     )
+    if args.curriculum and curriculum_stages is not None:
+        eval_cb = CurriculumEvalCallback(
+            stage_ids={
+                1: curriculum_stages.stage1,
+                2: curriculum_stages.stage2,
+                3: curriculum_stages.stage3,
+            },
+            train_env=train_env,
+            stage1_threshold=args.stage1_threshold,
+            stage2_threshold=args.stage2_threshold,
+            max_steps_per_stage=args.max_steps_per_stage if args.max_steps_per_stage > 0 else None,
+            **eval_cb_kwargs,
+        )
+    else:
+        eval_cb = EvalCallback(**eval_cb_kwargs)
     # In a sweep, skip model artifact uploads — they balloon storage for
     # little value when only the metric matters.
     wandb_cb = WandbCallback(
@@ -297,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
         progress_bar=False,
     )
     model.save(str(out_dir / "final_model.zip"))
+    train_env.save(str(out_dir / "vec_normalize.pkl"))
     logger.info("training complete; model saved to %s", out_dir / "final_model.zip")
 
     # Log final reward summary so the sweep optimiser has a guaranteed value

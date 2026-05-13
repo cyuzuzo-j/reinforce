@@ -21,7 +21,7 @@ WINDOW_FEATURES = (
 N_WINDOW_FEATURES = len(WINDOW_FEATURES)
 
 SCALAR_FEATURES = (
-    "position_frac",
+    "position_frac",        # signed in [-1, 1]: + = YES, − = NO
     "cash_frac",
     "portfolio_value_norm",
     "time_to_resolution_frac",
@@ -53,27 +53,29 @@ def build_observation_space(cfg: EnvConfig) -> spaces.Dict:
 
 
 def _causal_zscore(values: np.ndarray) -> np.ndarray:
-    """Z-score using stats computed only from the window itself (no episode-wide foresight)."""
+    """Z-score using stats from the window only (no episode-wide foresight)."""
     if values.size == 0:
         return values
-    mean = float(values.mean())
     std = float(values.std())
     if std < 1e-9:
         return np.zeros_like(values, dtype=np.float32)
-    return ((values - mean) / std).astype(np.float32)
+    return ((values - float(values.mean())) / std).astype(np.float32)
 
 
 def _window_from_history(history: list[Bar], cfg: EnvConfig) -> np.ndarray:
     n = cfg.lookback
     if len(history) < n:
-        raise ValueError(
-            f"history has {len(history)} bars, need at least lookback={n}"
-        )
+        raise ValueError(f"history has {len(history)} bars, need at least lookback={n}")
     window = history[-n:]
     closes = np.array([b.close for b in window], dtype=np.float64)
-    prev_close = history[-n - 1].close if len(history) > n else window[0].close
-    closes_for_ret = np.concatenate(([prev_close], closes))
-    log_ret = np.log(closes_for_ret[1:]) - np.log(closes_for_ret[:-1])
+
+    # log_return aligned to the window: slot i = log(close_i / close_{i-1}).
+    # When no prior bar exists (start of episode), the leading slot is 0.
+    if len(history) > n:
+        prev = history[-n - 1].close
+        log_ret = np.diff(np.log(np.concatenate(([prev], closes))))
+    else:
+        log_ret = np.concatenate(([0.0], np.diff(np.log(closes))))
 
     vol_usd = np.array([b.volume_usd for b in window], dtype=np.float64)
     vol_tok = np.array([b.volume_tokens for b in window], dtype=np.float64)
@@ -95,8 +97,7 @@ def _window_from_history(history: list[Bar], cfg: EnvConfig) -> np.ndarray:
     ).astype(np.float32)
 
     if cfg.extra_features:
-        extra = _extra_features_block(history, cfg)
-        out = np.concatenate([out, extra], axis=1)
+        out = np.concatenate([out, _extra_features_block(history, cfg)], axis=1)
     return out
 
 
@@ -135,7 +136,8 @@ def _extra_features_block(history: list[Bar], cfg: EnvConfig) -> np.ndarray:
 def pack_observation(
     history: list[Bar],
     *,
-    position_tokens: float,
+    yes_tokens: float,
+    no_tokens: float,
     cash: float,
     portfolio_value: float,
     bars_remaining: int,
@@ -143,16 +145,17 @@ def pack_observation(
     cfg: EnvConfig,
 ) -> dict:
     window = _window_from_history(history, cfg)
-    position_frac = (
-        float(min(max((portfolio_value - cash) / portfolio_value, 0.0), 1.0))
-        if portfolio_value > 1e-6 else 0.0
-    )
+    yes_close = history[-1].close if history else 0.0
+    yes_value = yes_tokens * yes_close
+    no_value = no_tokens * (1.0 - yes_close)
+    if portfolio_value > 1e-6:
+        position_frac = float((yes_value - no_value) / portfolio_value)
+        position_frac = float(min(max(position_frac, -1.0), 1.0))
+    else:
+        position_frac = 0.0
     cash_frac = float(cash / cfg.initial_cash) if cfg.initial_cash > 0 else 0.0
     pv_norm = float(portfolio_value / cfg.initial_cash) if cfg.initial_cash > 0 else 0.0
-    if total_bars > 0:
-        t_remaining = float(max(0, bars_remaining)) / float(total_bars)
-    else:
-        t_remaining = 0.0
+    t_remaining = float(max(0, bars_remaining)) / float(total_bars) if total_bars > 0 else 0.0
     scalars = np.array(
         [position_frac, cash_frac, pv_norm, t_remaining], dtype=np.float32
     )

@@ -24,7 +24,8 @@ def _make_trades(
     prices = np.clip(base_price + walk, 0.02, 0.98)
     return pd.DataFrame(
         {
-            "datetime": timestamps,
+            # MarketLoader.load_trades reads `timestamp` (unix seconds) — matches prod schema.
+            "timestamp": (timestamps.astype("int64") // 1_000_000_000).astype("uint64"),
             "market_id": market_id,
             "price": prices,
             "usd_amount": rng.uniform(10.0, 100.0, size=n_minutes),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import gymnasium as gym
@@ -13,15 +14,16 @@ from polymarket_gym.spaces import build_observation_space, pack_observation
 
 
 class PolymarketDirectionalEnv(gym.Env):
-    """Single-market YES-only directional trading env.
+    """Single-market YES/NO directional trading env.
 
-    Action space: ``Discrete(3)`` — 0 = sell all, 1 = hold, 2 = buy all.
-    Reward: mark-to-market change in portfolio value, minus optional
-    invalid-action penalty. Terminal settlement at ``feed.settlement_price()``.
+    Action space: ``Discrete(2N-1)`` mapping to signed target fractions in
+    ``[-1, 1]`` of portfolio value. Positive = long YES, negative = long NO,
+    middle = flat. With ``n_action_levels=N``, action ``N-1`` is flat,
+    ``2N-2`` is full YES, ``0`` is full NO.
 
-    The env depends only on the ``MarketFeed`` and ``ExecutionVenue``
-    protocols, so swapping a historical replay for a live websocket feed
-    (and a simulated venue for a real CLOB venue) is purely wiring.
+    Reward: per-step log-return of portfolio value. Terminal settlement at
+    ``feed.settlement_price()`` is just the last bar's mark — log-return
+    naturally absorbs the payoff jump from final close to ``yes_payoff``.
     """
 
     metadata = {"render_modes": []}
@@ -38,16 +40,14 @@ class PolymarketDirectionalEnv(gym.Env):
         self.cfg = config if config is not None else EnvConfig()
         self.feed = feed
         self.venue = venue if venue is not None else SimulatedVenue()
-        self.action_space = spaces.Discrete(self.cfg.n_action_levels)
-        self._action_fracs = [
-            i / max(self.cfg.n_action_levels - 1, 1)
-            for i in range(self.cfg.n_action_levels)
-        ]
+        self.action_space = spaces.Discrete(self.cfg.n_actions)
+        self._action_fracs = self.cfg.action_fracs
         self.observation_space = build_observation_space(self.cfg)
 
         self._rng: np.random.Generator = np.random.default_rng(self.cfg.seed)
         self._cash: float = self.cfg.initial_cash
-        self._position_tokens: float = 0.0
+        self._yes_tokens: float = 0.0
+        self._no_tokens: float = 0.0
         self._pv_prev: float = self.cfg.initial_cash
         self._last_close: float = 0.0
         self._step_count: int = 0
@@ -68,44 +68,34 @@ class PolymarketDirectionalEnv(gym.Env):
             self._rng = np.random.default_rng(seed)
         elif self.cfg.seed is not None:
             self._rng = np.random.default_rng(self.cfg.seed)
-        market_id = None
-        if options is not None:
-            market_id = options.get("market_id")
+        market_id = options.get("market_id") if options else None
 
         meta = self.feed.reset(market_id=market_id, rng=self._rng)
         self._market_meta = meta
         self._total_bars = meta.n_bars
         self._cash = float(self.cfg.initial_cash)
-        self._position_tokens = 0.0
+        self._yes_tokens = 0.0
+        self._no_tokens = 0.0
         self._pv_prev = float(self.cfg.initial_cash)
         self._step_count = 0
         self._terminated = False
 
         history = self.feed.history()
         self._last_close = history[-1].close if history else 0.0
-        obs = pack_observation(
-            history,
-            position_tokens=self._position_tokens,
-            cash=self._cash,
-            portfolio_value=self._pv_prev,
-            bars_remaining=self._total_bars - len(history),
-            total_bars=self._total_bars,
-            cfg=self.cfg,
-        )
         info = {
             "market_id": meta.market_id,
             "question": meta.question,
             "yes_payoff": meta.yes_payoff,
             "n_bars": meta.n_bars,
         }
-        return obs, info
+        return self._obs(), info
 
     def step(self, action: int) -> tuple[dict, float, bool, bool, dict]:
         if self._terminated:
             raise RuntimeError("step() called on a terminated episode; call reset() first")
         action = int(action)
-        if not (0 <= action < self.cfg.n_action_levels):
-            raise ValueError(f"action must be in [0, {self.cfg.n_action_levels}), got {action}")
+        if not (0 <= action < self.cfg.n_actions):
+            raise ValueError(f"action must be in [0, {self.cfg.n_actions}), got {action}")
 
         next_bar = self.feed.advance()
         if next_bar is None:
@@ -115,103 +105,107 @@ class PolymarketDirectionalEnv(gym.Env):
         fill = self.venue.submit(
             target_frac=target_frac,
             next_bar=next_bar,
-            position_tokens=self._position_tokens,
+            yes_tokens=self._yes_tokens,
+            no_tokens=self._no_tokens,
             cash=self._cash,
             cfg=self.cfg,
         )
         self._apply_fill(fill)
 
-        penalty = self._invalid_action_penalty(action, fill)
-        pv_new = self._cash + self._position_tokens * next_bar.close
-        reward = (pv_new - self._pv_prev) - penalty
+        pv_new = self._mark_to_market(next_bar.close)
+        reward = self._log_return(pv_new)
         self._pv_prev = pv_new
         self._last_close = next_bar.close
         self._step_count += 1
+
+        info = {
+            "pv": pv_new,
+            "cash": self._cash,
+            "yes_tokens": self._yes_tokens,
+            "no_tokens": self._no_tokens,
+            "position_tokens": self._yes_tokens - self._no_tokens,  # legacy
+            "bar_close": next_bar.close,
+            "bar_open": next_bar.open,
+            "last_fill_price": fill.fill_price,
+            "fill_side": fill.side,
+            "fee_paid": fill.fee_paid,
+            "step": self._step_count,
+        }
 
         truncated = (
             self.cfg.max_episode_steps is not None
             and self._step_count >= self.cfg.max_episode_steps
         )
-
-        history = self.feed.history()
-        bars_remaining = max(0, self._total_bars - len(history))
-        obs = pack_observation(
-            history,
-            position_tokens=self._position_tokens,
-            cash=self._cash,
-            portfolio_value=pv_new,
-            bars_remaining=bars_remaining,
-            total_bars=self._total_bars,
-            cfg=self.cfg,
-        )
-        info = {
-            "pv": pv_new,
-            "cash": self._cash,
-            "position_tokens": self._position_tokens,
-            "bar_close": next_bar.close,
-            "bar_open": next_bar.open,
-            "last_fill_price": fill.fill_price if fill.tokens_delta != 0 else None,
-            "fee_paid": fill.fee_paid,
-            "step": self._step_count,
-        }
-        terminated = False
         if truncated:
-            self._terminated = True
-        return obs, float(reward), terminated, bool(truncated), info
+            obs, settle_reward, _, _, settle_info = self._finalize_episode(force_settle=True)
+            return obs, float(reward + settle_reward), False, True, {**info, **settle_info}
+
+        return self._obs(), float(reward), False, False, info
 
     def close(self) -> None:
-        close_feed = getattr(self.feed, "close", None)
-        if callable(close_feed):
-            close_feed()
-        close_venue = getattr(self.venue, "close", None)
-        if callable(close_venue):
-            close_venue()
+        for target in (self.feed, self.venue):
+            fn = getattr(target, "close", None)
+            if callable(fn):
+                fn()
 
     # --- internals -----------------------------------------------------
 
     def _apply_fill(self, fill: FillResult) -> None:
         self._cash += fill.cash_delta
-        self._position_tokens += fill.tokens_delta
-        if abs(self._position_tokens) < 1e-12:
-            self._position_tokens = 0.0
+        self._yes_tokens += fill.yes_delta
+        self._no_tokens += fill.no_delta
+        if abs(self._yes_tokens) < 1e-12:
+            self._yes_tokens = 0.0
+        if abs(self._no_tokens) < 1e-12:
+            self._no_tokens = 0.0
         if abs(self._cash) < 1e-12:
             self._cash = 0.0
 
-    def _invalid_action_penalty(self, action: int, fill: FillResult) -> float:
-        if self.cfg.invalid_action_penalty == 0.0:
-            return 0.0
-        is_buy_when_long = action == 2 and self._position_tokens > 0.0 and fill.tokens_delta == 0
-        is_sell_when_flat = action == 0 and self._position_tokens == 0.0 and fill.tokens_delta == 0
-        if is_buy_when_long or is_sell_when_flat:
-            return float(self.cfg.invalid_action_penalty)
-        return 0.0
+    def _mark_to_market(self, yes_close: float) -> float:
+        return self._cash + self._yes_tokens * yes_close + self._no_tokens * (1.0 - yes_close)
 
-    def _finalize_episode(self) -> tuple[dict, float, bool, bool, dict]:
-        self._terminated = True
-        settlement = self.feed.settlement_price() if self.cfg.terminal_settlement else None
-        reward = 0.0
-        if settlement is not None and self._position_tokens > 0.0:
-            settle_delta = (settlement - self._last_close) * self._position_tokens
-            self._cash += self._position_tokens * settlement
-            self._pv_prev = self._cash
-            self._position_tokens = 0.0
-            reward = settle_delta
+    def _log_return(self, pv_new: float) -> float:
+        return math.log(max(pv_new, 1e-9) / max(self._pv_prev, 1e-9))
+
+    def _obs(self) -> dict:
         history = self.feed.history()
-        obs = pack_observation(
+        bars_remaining = max(0, self._total_bars - len(history))
+        yes_close = history[-1].close if history else 0.0
+        return pack_observation(
             history,
-            position_tokens=self._position_tokens,
+            yes_tokens=self._yes_tokens,
+            no_tokens=self._no_tokens,
             cash=self._cash,
-            portfolio_value=self._pv_prev,
-            bars_remaining=0,
+            portfolio_value=self._mark_to_market(yes_close),
+            bars_remaining=bars_remaining,
             total_bars=self._total_bars,
             cfg=self.cfg,
         )
+
+    def _finalize_episode(self, *, force_settle: bool = False) -> tuple[dict, float, bool, bool, dict]:
+        self._terminated = True
+        settlement = self.feed.settlement_price() if self.cfg.terminal_settlement else None
+        if settlement is None and force_settle and self.cfg.terminal_settlement and self._market_meta is not None:
+            settlement = self._market_meta.yes_payoff
+        if settlement is not None:
+            yes_cash = self._yes_tokens * settlement
+            no_cash = self._no_tokens * (1.0 - settlement)
+            self._cash += yes_cash + no_cash
+            self._yes_tokens = 0.0
+            self._no_tokens = 0.0
+            pv_new = self._cash
+        else:
+            pv_new = self._mark_to_market(self._last_close)
+        reward = self._log_return(pv_new)
+        self._pv_prev = pv_new
         info = {
-            "pv": self._pv_prev,
+            "pv": pv_new,
             "cash": self._cash,
-            "position_tokens": self._position_tokens,
+            "yes_tokens": self._yes_tokens,
+            "no_tokens": self._no_tokens,
+            "position_tokens": 0.0,
             "settlement_price": settlement,
             "settled": settlement is not None,
             "step": self._step_count,
         }
-        return obs, float(reward), True, False, info
+        return self._obs(), float(reward), True, False, info

@@ -38,7 +38,15 @@ from polymarket_gym.policy import FlaxPolicyFeatures
 
 logger = logging.getLogger("live_demo")
 
-ACTION_NAMES = {0: "SELL", 1: "HOLD", 2: "BUY "}
+def _action_label(action: int, n_actions: int) -> str:
+    """Map signed-discrete action to a short label like '+0.67 YES' or '-1.00 NO'."""
+    n_levels = (n_actions + 1) // 2
+    frac = (action - (n_levels - 1)) / max(n_levels - 1, 1)
+    if frac > 1e-9:
+        return f"+{frac:.2f} YES"
+    if frac < -1e-9:
+        return f"-{abs(frac):.2f} NO"
+    return "  0.00 FLAT"
 
 
 def _default_ckpt() -> Path:
@@ -177,10 +185,11 @@ def main(argv: list[str] | None = None) -> int:
     # First inference on the bootstrap snapshot.
     action0, _ = model.predict(obs, deterministic=args.deterministic)
     action0 = int(action0)
-    pv0 = base_env._cash + base_env._position_tokens * base_env._last_close
+    pv0 = base_env._mark_to_market(base_env._last_close)
+    n_act = base_env.cfg.n_actions
     print(
         f"\n[bootstrap]  bar_ts={feed._bars[-1].ts}  close={base_env._last_close:.4f}  "
-        f"pv=${pv0:.2f}  action={ACTION_NAMES[action0]}({action0})"
+        f"pv=${pv0:.2f}  action={_action_label(action0, n_act)}({action0})"
     )
 
     # Live loop: each step waits for the next bar boundary.
@@ -194,12 +203,13 @@ def main(argv: list[str] | None = None) -> int:
             step_count += 1
             pv = step_info.get("pv", 0.0)
             cash = step_info.get("cash", 0.0)
-            pos_tokens = step_info.get("position_tokens", 0.0)
+            yes_tok = step_info.get("yes_tokens", 0.0)
+            no_tok = step_info.get("no_tokens", 0.0)
             bar_close = step_info.get("bar_close", 0.0)
             print(
                 f"[step {step_count:3d}]  bar_close={bar_close:.4f}  reward={reward:+.4f}  "
-                f"pv=${pv:.2f}  cash=${cash:.2f}  pos={pos_tokens:.3f} tok  "
-                f"action(executed)={ACTION_NAMES[cur_action]}({cur_action})"
+                f"pv=${pv:.2f}  cash=${cash:.2f}  yes={yes_tok:.2f} no={no_tok:.2f}  "
+                f"action(executed)={_action_label(cur_action, n_act)}({cur_action})"
             )
             if terminated or truncated:
                 logger.info(
@@ -210,14 +220,14 @@ def main(argv: list[str] | None = None) -> int:
             cur_action, _ = model.predict(obs, deterministic=args.deterministic)
             cur_action = int(cur_action)
             print(
-                f"             next predicted action={ACTION_NAMES[cur_action]}({cur_action})"
+                f"             next predicted action={_action_label(cur_action, n_act)}({cur_action})"
             )
     except KeyboardInterrupt:
         logger.info("interrupted by user")
     finally:
         env.close()
 
-    final_pv = base_env._cash + base_env._position_tokens * base_env._last_close
+    final_pv = base_env._mark_to_market(base_env._last_close)
     pnl = final_pv - args.initial_cash
     print(
         f"\nfinal_pv=${final_pv:.2f}  pnl={pnl:+.2f} "

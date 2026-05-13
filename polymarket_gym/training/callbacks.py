@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import collections
+import logging
 from pathlib import Path
 from typing import Callable
 
@@ -10,7 +12,10 @@ import numpy as np
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from stable_baselines3.common.callbacks import BaseCallback  # noqa: E402
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback  # noqa: E402
+from stable_baselines3.common.vec_env import VecEnv  # noqa: E402
+
+_log = logging.getLogger(__name__)
 
 
 class StepRewardLoggerCallback(BaseCallback):
@@ -118,6 +123,7 @@ class VisualizationCallback(BaseCallback):
             rewards: list[float] = []
             fill_prices: list[float | None] = []
 
+            sides: list[str] = []
             done = False
             while not done:
                 action, _ = self.model.predict(obs, deterministic=self._deterministic)
@@ -131,6 +137,7 @@ class VisualizationCallback(BaseCallback):
                 rewards.append(float(reward))
                 fp = info.get("last_fill_price")
                 fill_prices.append(float(fp) if fp is not None else None)
+                sides.append(str(info.get("fill_side", "flat")))
         finally:
             env.close()
 
@@ -142,7 +149,7 @@ class VisualizationCallback(BaseCallback):
             pass
 
         out_path = self._out_dir / f"ep_{episode_idx:06d}_{market_id}.png"
-        self._render(out_path, market_id, prices, actions, positions, pvs, fill_prices, ep_return)
+        self._render(out_path, market_id, prices, actions, positions, pvs, fill_prices, sides, ep_return)
 
     def _render(
         self,
@@ -153,6 +160,7 @@ class VisualizationCallback(BaseCallback):
         positions: list[float],
         pvs: list[float],
         fill_prices: list[float | None],
+        sides: list[str],
         ep_return: float,
     ) -> None:
         fig, (ax_top, ax_bot) = plt.subplots(
@@ -163,25 +171,21 @@ class VisualizationCallback(BaseCallback):
         steps = np.arange(len(prices))
         ax_top.plot(steps, prices, color="steelblue", label="YES price", linewidth=1.2)
 
-        in_position = np.array(positions) > 0.0
-        if in_position.any():
-            ax_top.fill_between(
-                steps,
-                np.nanmin(prices) if prices else 0.0,
-                np.nanmax(prices) if prices else 1.0,
-                where=in_position,
-                color="green",
-                alpha=0.08,
-                label="long YES",
-            )
+        pos_arr = np.array(positions)
+        lo = float(np.nanmin(prices)) if prices else 0.0
+        hi = float(np.nanmax(prices)) if prices else 1.0
+        for mask, color, label in (
+            (pos_arr > 0.0, "green", "long YES"),
+            (pos_arr < 0.0, "red", "long NO"),
+        ):
+            if mask.any():
+                ax_top.fill_between(steps, lo, hi, where=mask, color=color, alpha=0.08, label=label)
 
-        for i, (a, fp) in enumerate(zip(actions, fill_prices)):
-            if fp is None:
+        for i, (fp, side) in enumerate(zip(fill_prices, sides)):
+            if fp is None or side == "flat":
                 continue
-            if a == 2:
-                ax_top.scatter(i, fp, marker="^", color="green", s=60, zorder=5)
-            elif a == 0:
-                ax_top.scatter(i, fp, marker="v", color="red", s=60, zorder=5)
+            marker, color = ("^", "green") if side == "yes" else ("v", "red")
+            ax_top.scatter(i, fp, marker=marker, color=color, s=60, zorder=5)
 
         ax_top.set_ylabel("price")
         ax_top.set_title(
@@ -240,3 +244,129 @@ class VisualizationCallback(BaseCallback):
         fig.tight_layout()
         fig.savefig(out_path, dpi=110)
         plt.close(fig)
+
+
+class CurriculumEvalCallback(EvalCallback):
+    """EvalCallback that expands the training market pool as the agent improves.
+
+    Stages:
+      1 → 2: rolling mean eval reward (window=3) > stage1_threshold
+      2 → 3: rolling mean eval reward > stage2_threshold
+
+    On each promotion the VecNormalize reward running stats are reset so the
+    new market distribution is re-calibrated from scratch (avoids stale scale
+    from the easier stage contaminating PPO updates).
+
+    If the agent stalls at a stage for more than `max_steps_per_stage` training
+    steps, it is force-promoted regardless of eval performance.
+
+    Parameters
+    ----------
+    stage_ids:
+        Dict mapping stage number (1, 2, 3) to list of training market IDs.
+    train_env:
+        The VecNormalize-wrapped training VecEnv (needed for env_method calls
+        and reward stat resets).
+    stage1_threshold, stage2_threshold:
+        Rolling-average eval reward thresholds for stage promotion.
+    rolling_window:
+        Number of consecutive eval results to average before checking threshold.
+    max_steps_per_stage:
+        Force-promote after this many training steps without graduating.
+        None disables force-promotion.
+    All other kwargs are forwarded to EvalCallback.
+    """
+
+    def __init__(
+        self,
+        stage_ids: dict[int, list[str]],
+        train_env: VecEnv,
+        stage1_threshold: float = 0.5,
+        stage2_threshold: float = 2.0,
+        rolling_window: int = 3,
+        max_steps_per_stage: int | None = 300_000,
+        **eval_callback_kwargs,
+    ) -> None:
+        super().__init__(**eval_callback_kwargs)
+        self._stage_ids = stage_ids
+        self._train_env = train_env
+        self._stage1_threshold = stage1_threshold
+        self._stage2_threshold = stage2_threshold
+        self._rolling: collections.deque[float] = collections.deque(maxlen=rolling_window)
+        self._current_stage = 1
+        self._stage_start_step: int = 0
+        self._max_steps_per_stage = max_steps_per_stage
+
+    # EvalCallback runs its eval logic inside _on_step; after super()._on_step()
+    # returns, self.last_mean_reward has already been updated for this eval tick.
+    def _on_step(self) -> bool:
+        result = super()._on_step()
+
+        # Check whether an eval just happened (mirrors EvalCallback's own check).
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            self._rolling.append(self.last_mean_reward)
+            self._try_promote()
+
+        return result
+
+    def _try_promote(self) -> None:
+        if self._current_stage >= 3:
+            return
+
+        steps_in_stage = self.num_timesteps - self._stage_start_step
+        force = (
+            self._max_steps_per_stage is not None
+            and steps_in_stage >= self._max_steps_per_stage
+        )
+
+        if self._current_stage == 1:
+            threshold = self._stage1_threshold
+            next_stage = 2
+        else:
+            threshold = self._stage2_threshold
+            next_stage = 3
+
+        rolling_avg = float(np.mean(list(self._rolling))) if self._rolling else -np.inf
+        should_promote = force or (
+            len(self._rolling) == self._rolling.maxlen and rolling_avg > threshold
+        )
+
+        if not should_promote:
+            return
+
+        reason = "force" if force else f"rolling_avg={rolling_avg:.3f} > {threshold}"
+        _log.info(
+            "curriculum: stage %d → %d at step %d (%s)",
+            self._current_stage, next_stage, self.num_timesteps, reason,
+        )
+
+        new_ids = self._stage_ids.get(next_stage, self._stage_ids[3])
+        self._train_env.env_method("set_market_ids", new_ids)
+
+        # Reset VecNormalize reward running stats so the harder market
+        # distribution is re-calibrated rather than being squashed by the
+        # easy-stage scale.
+        try:
+            from stable_baselines3.common.running_mean_std import RunningMeanStd
+            self._train_env.ret_rms = RunningMeanStd(shape=())
+            _log.info("curriculum: reset VecNormalize reward running stats")
+        except Exception as exc:
+            _log.warning("curriculum: could not reset reward rms: %s", exc)
+
+        self._current_stage = next_stage
+        self._stage_start_step = self.num_timesteps
+        self._rolling.clear()
+
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.log(
+                    {
+                        "curriculum/stage": self._current_stage,
+                        "curriculum/promoted_reason": reason,
+                        "curriculum/n_train_markets": len(new_ids),
+                    },
+                    step=self.num_timesteps,
+                )
+        except Exception:
+            pass
